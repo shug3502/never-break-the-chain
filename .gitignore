@@ -1,0 +1,27 @@
+# Data & model artifacts (never commit — competition data is large & external)
+data/
+models/
+outputs/
+*.zarr/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# Notebooks / Quarto
+*_files/
+/.quarto/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Kaggle credentials (should live in ~/.kaggle, never in repo)
+kaggle.json
