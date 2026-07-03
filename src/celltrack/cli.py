@@ -82,10 +82,64 @@ def track(
     typer.echo(f"Wrote submission with {len(graphs)} datasets to {path}")
 
 
+@app.command()
+def simulate(
+    out_dir: str = typer.Option("outputs/sim", help="Output root."),
+    n_datasets: int = typer.Option(3, help="Number of synthetic datasets."),
+    n_frames: int = typer.Option(40, help="Frames per dataset."),
+    seed: int = typer.Option(0, help="Master RNG seed."),
+    randomize: bool = typer.Option(True, help="Domain-randomize config per dataset."),
+) -> None:
+    """Generate synthetic labelled lineages: noisy detection CSVs + GT submission CSV.
+
+    Writes ``<out_dir>/detections/<name>.csv`` (same schema as ``detect``, so
+    ``track`` consumes them unchanged), ``<out_dir>/gt.csv`` (a GT submission
+    CSV for ``eval``), and ``<out_dir>/est_nodes.csv``. Oracle workflow::
+
+        celltrack simulate --out-dir outputs/sim
+        celltrack track --det-dir outputs/sim/detections --out outputs/sim/pred.csv
+        celltrack eval  outputs/sim/pred.csv outputs/sim/gt.csv
+    """
+    from celltrack.pretrain import SimConfig, iter_datasets, simulate_dataset
+
+    out = Path(out_dir)
+    det_dir = out / "detections"
+    det_dir.mkdir(parents=True, exist_ok=True)
+
+    if randomize:
+        datasets = iter_datasets(n_datasets, seed=seed, n_frames=n_frames)
+    else:
+        datasets = (
+            simulate_dataset(SimConfig(n_frames=n_frames, seed=seed + i), name=f"sim{i:04d}")
+            for i in range(n_datasets)
+        )
+
+    graphs = {}
+    est_rows = []
+    for ds in datasets:
+        rows = [
+            {"t": t, "z": d.z, "y": d.y, "x": d.x, "probability": d.probability}
+            for t, dets in sorted(ds.observed.by_time.items())
+            for d in dets
+        ]
+        pd.DataFrame(rows, columns=["t", "z", "y", "x", "probability"]).to_csv(
+            det_dir / f"{ds.name}.csv", index=False
+        )
+        graphs[ds.name] = ds.gt_graph
+        est_rows.append({"name": ds.name, "est_nodes": ds.est_nodes})
+        typer.echo(f"{ds.name}: {ds.gt_graph.num_nodes()} gt nodes, {len(rows)} detections")
+
+    gt_path = write_submission(graphs, out / "gt.csv")
+    pd.DataFrame(est_rows).to_csv(out / "est_nodes.csv", index=False)
+    typer.echo(f"Wrote {len(graphs)} datasets to {out} (gt: {gt_path})")
+
+
 @app.command("eval")
 def eval_cmd(
     pred: str = typer.Argument(..., help="Prediction submission CSV."),
-    gt: str = typer.Argument(..., help="Ground truth: a submission CSV, or a directory of .geff stores."),
+    gt: str = typer.Argument(
+        ..., help="Ground truth: a submission CSV, or a directory of .geff stores."
+    ),
 ) -> None:
     """Score a prediction against ground truth using the competition metric.
 

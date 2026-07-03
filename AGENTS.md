@@ -30,12 +30,12 @@ Start-here for a new agent: `docs/handoff.md`.
 - Always activate the venv before running things: `source .venv/bin/activate`.
 - Use **`just`** for the common tasks (recipes wrap the `.venv` tools; run
   `just` to list them):
-  - `just test` — run the suite (`python -m pytest -q`, 15 tests, currently all
+  - `just test` — run the suite (`python -m pytest -q`, 28 tests, currently all
     green); pass through args, e.g. `just test -k metric`.
   - `just lint` / `just lint-fix` — `ruff check src tests` (must stay clean).
   - `just format` / `just format-check` — `ruff format src tests`.
   - `just check` — lint + format-check + test (the full pre-commit gate).
-- CLI: `celltrack {download,detect,track,eval,submit} --help`
+- CLI: `celltrack {download,detect,simulate,track,eval,submit} --help`
 
 ## Repository layout
 
@@ -56,11 +56,18 @@ src/celltrack/
     metric.py    # competition metric: edge + division Jaccard (RECONCILED)
   submit/
     submission.py  # node/edge CSV writer / reader / validator
-  cli.py         # download -> detect -> track -> eval -> submit
-tests/           # pytest: submission I/O, metric, geff loader
+  pretrain/      # mechanistic lineage simulator (synthetic pre-training data)
+    config.py    # SimConfig + Priors + sample_config (domain randomization)
+    motion.py    # OU velocity + Fourier drift field + division impulse; to_voxel
+    lineage.py   # branching birth-death forest -> node table + edges
+    noise.py     # detection noise (FN/FP/jitter/merge/split) + GT labels
+    simulate.py  # simulate_dataset / iter_datasets -> SimulatedDataset
+  cli.py         # download -> detect -> simulate -> track -> eval -> submit
+tests/           # pytest: submission I/O, metric, geff loader, simulator
 requirements/    # spec-driven-development artifacts (the "why")
 notebooks/       # reference notebooks (e.g. the community metric implementation)
 docs/handoff.md  # onboarding for the next agent
+docs/ideas/pre-training.md  # pre-training ideas (simulator == "Idea 2")
 ```
 
 ## Domain facts you MUST respect (confirmed)
@@ -89,6 +96,38 @@ docs/handoff.md  # onboarding for the next agent
 - **GT is `.geff`** (zarr graph), not CSV. Use `celltrack.data.geff`.
 - **Images are zarr v3**, shape `(T, Z, Y, X)`, full-res at `<ds>.zarr/0`,
   terabyte-scale → stream per timepoint, never load whole datasets into RAM.
+
+## Mechanistic lineage simulator (`celltrack.pretrain`)
+
+A pure-CPU (numpy/scipy/networkx, **no torch**) generator of *fully-labelled*
+synthetic 3D+time lineages — graphs + noisy detections, **no images** — for
+supervised pre-training of the tracking/division layer and as a **known-answer
+oracle** for the tracker and the (silently-regressing) metric. Needs no real
+data, so it works today despite the download blocker. This is "Idea 2" in
+`docs/ideas/pre-training.md`.
+
+- **Output.** `simulate_dataset(config, *, name, rng) -> SimulatedDataset` with a
+  clean `gt_graph: TrackGraph`, `observed: ObservedDetections` (per-timepoint
+  `Detection`s + a parallel `gt_node_of` label list; `None` == false positive),
+  and `est_nodes` (the dense true-cell count = GT node count, for the metric's
+  over-prediction penalty). `iter_datasets(n, seed=...)` yields domain-randomised
+  datasets on the fly (`n=None` → infinite).
+- **Layers** (each a pure `rng`-taking function): birth-death lineage
+  (Gamma/lognormal cell cycle, death, influx) → OU + Fourier-drift motion in µm
+  with an anti-correlated division impulse → discretise to anisotropic integer
+  voxels via `VOXEL_SCALE_UM` → detection noise (FN/FP/jitter-heavier-in-z/
+  merge/split). All motion/noise scales stay below `MATCH_MAX_UM` so clean
+  observations remain matchable.
+- **Reproducibility.** Everything is seeded (`numpy.random.default_rng`); same
+  seed ⇒ identical output. Use it as a metric/tracker oracle:
+  `score({n: gt}, {n: gt}, est_nodes={n: est})` must return `combined == 1.0`.
+- **CLI.** `celltrack simulate` dumps detection CSVs (same schema as `detect`)
+  + a GT submission CSV (for `eval`) + `est_nodes.csv`, so the existing
+  `detect → track → eval` pipeline runs on known-answer data. Note the baseline
+  tracker emits no divisions, so its Division Jaccard on synthetic data is 0 by
+  design — that is the gap the core tracking layer must close.
+- **Consumes** `graph.Node`/`TrackGraph`, `detect.base.Detection`, and the
+  `constants`/`metric`/`submit` APIs unchanged — no new dependencies.
 
 ## Known blocker
 
