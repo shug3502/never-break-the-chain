@@ -100,8 +100,7 @@ Kaggle website once before downloads authorize (else HTTP 403).
 
 ## Conventions
 
-- Imports at the **top** of files (project-wide), except deliberately lazy heavy
-  ML imports (torch/cellpose) inside functions — keep those lazy.
+- Imports at the **top** of files (project-wide)
 - Keep detection decoupled from tracking via the `Detector` Protocol; new
   detectors must not require changes in `track/` or `eval/`.
 - Notebooks: prefer **Quarto `.qmd`**.
@@ -112,7 +111,6 @@ Kaggle website once before downloads authorize (else HTTP 403).
 
 ## Git
 
-- The repo is **not yet initialized** (`git init` has not been run).
 - When committing, **do NOT add Claude/AI as a commit co-author.**
 - Use the `gh` CLI for GitHub operations / PRs.
 

@@ -21,6 +21,7 @@ from celltrack.detect.base import Detection
 from celltrack.eval.metric import score
 from celltrack.submit.submission import read_submission, validate_submission, write_submission
 from celltrack.track.nearest_neighbor import track_frames
+from celltrack.data.download import download_competition_data
 
 app = typer.Typer(help="3D+time cell tracking for the Biohub Kaggle competition.")
 
@@ -31,7 +32,6 @@ def download(
     insecure: bool = typer.Option(False, help="curl -k (last resort for SSL)."),
 ) -> None:
     """Download competition data via the Kaggle API (SSL-workaround)."""
-    from celltrack.data.download import download_competition_data
 
     archive = download_competition_data(dest=dest, insecure=insecure)
     typer.echo(f"Downloaded {archive}")
