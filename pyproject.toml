@@ -33,6 +33,12 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.5",
 ]
+eda = [
+    "matplotlib>=3.8",    # EDA plots
+    "jupyter>=1.0",       # Quarto Python execution (jupyter kernel + nbclient)
+    "ipykernel>=6.29",
+    "jupyter-cache>=1.0", # Quarto `execute: cache` for the EDA notebook
+]
 
 [project.scripts]
 celltrack = "celltrack.cli:app"

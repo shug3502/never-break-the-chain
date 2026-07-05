@@ -1,0 +1,442 @@
+---
+title: "celltrack EDA — Biohub Cell Tracking During Development"
+subtitle: "What the real training & test data actually look like"
+author: "celltrack"
+date: last-modified
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-tools: true
+    fig-width: 8
+    fig-height: 4.5
+    embed-resources: true
+    theme: cosmo
+jupyter: python3
+execute:
+  warning: false
+  cache: true
+---
+
+Exploratory analysis of the downloaded competition data, verifying the
+assumptions baked into `celltrack` (voxel scale, match gate, sparse-GT metric)
+against what is actually on disk. Every number here is measured live from
+`data/`; nothing is hard-coded.
+
+The takeaways feed directly into the modelling strategy:
+
+- the **anisotropic voxel scale** and **7 µm match gate** the tracker/metric rely on,
+- how **sparse** the ground truth is (why the metric ignores unmatched nodes),
+- how far cells **move per frame** (does the 7 µm gate actually cover real motion?),
+- how common **divisions** are (the core-IP target), and
+- that the **4 test images have offline ground truth** (a real local metric).
+
+```{python}
+# | label: setup
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+from celltrack.constants import MATCH_MAX_UM, VOXEL_SCALE_UM
+from celltrack.data.geff import read_geff
+from celltrack.data.io import open_dataset, read_volume
+from celltrack.eval.metric import score
+
+
+# Resolve the repo root whether rendered from notebooks/ or the repo root.
+def _find_root() -> Path:
+    for base in (Path.cwd(), *Path.cwd().parents):
+        if (base / "data" / "train").is_dir():
+            return base
+    raise FileNotFoundError("Could not locate data/train from the working directory.")
+
+
+ROOT = _find_root()
+TRAIN, TEST = ROOT / "data" / "train", ROOT / "data" / "test"
+
+plt.rcParams.update({"figure.dpi": 110, "axes.grid": True, "grid.alpha": 0.3})
+C_44b6, C_6bba = "#4C72B0", "#DD8452"  # per-embryo colours used throughout
+print(f"repo root: {ROOT}")
+print(f"VOXEL_SCALE_UM (z, y, x) = {VOXEL_SCALE_UM}  |  MATCH_MAX_UM = {MATCH_MAX_UM} µm")
+```
+
+## 1. Data inventory
+
+```{python}
+# | label: inventory
+train_geff = sorted(TRAIN.glob("*.geff"))
+train_zarr = sorted(TRAIN.glob("*.zarr"))
+test_zarr = sorted(TEST.glob("*.zarr"))
+
+
+def embryo(name: str) -> str:
+    return name.split("_")[0]
+
+
+train_names = [p.name[: -len(".geff")] for p in train_geff]
+inv = pd.DataFrame({"dataset": train_names})
+inv["embryo"] = inv["dataset"].map(embryo)
+
+print(f"train: {len(train_geff)} .geff + {len(train_zarr)} .zarr pairs")
+print(f"test:  {len(test_zarr)} .zarr images (no shipped GT dir)")
+print("\ntrain datasets per embryo:")
+print(inv["embryo"].value_counts().to_string())
+```
+
+Two embryos, distinguished by the name prefix (`44b6_*`, `6bba_*`). Every train
+dataset is an image + ground-truth pair; the test folder holds images only.
+
+## 2. Image geometry & voxel scale
+
+Image metadata comes straight from each `zarr.json` (no pixel reads), so this is
+cheap to run across all datasets.
+
+```{python}
+# | label: geometry
+def image_meta(zarr_path: Path) -> dict:
+    root = json.loads((zarr_path / "zarr.json").read_text())
+    arr = json.loads((zarr_path / "0" / "zarr.json").read_text())
+    ms = root["attributes"]["multiscales"][0]
+    scale = ms["datasets"][0]["coordinateTransformations"][0]["scale"]
+    q = root["attributes"].get("image_statistics", {}).get("quantiles", {})
+    return {
+        "dataset": zarr_path.name[: -len(".zarr")],
+        "shape": tuple(arr["shape"]),
+        "dtype": arr["data_type"],
+        "scale_t": scale[0],
+        "scale_z": scale[1],
+        "scale_y": scale[2],
+        "scale_x": scale[3],
+        **{f"q{k}": v for k, v in q.items()},
+    }
+
+
+geom = pd.DataFrame(image_meta(p) for p in train_zarr + test_zarr)
+print("unique image shapes:", geom["shape"].value_counts().to_dict())
+print("unique dtypes:      ", geom["dtype"].unique().tolist())
+print("unique (z,y,x) scales:")
+print(geom[["scale_z", "scale_y", "scale_x"]].drop_duplicates().to_string(index=False))
+```
+
+Every image is identical in geometry: **`(T=100, Z=64, Y=256, X=256)` `uint16`**
+(~800 MB each — modest, not terabyte-scale). The physical voxel scale matches
+`VOXEL_SCALE_UM` exactly: z is **4×** coarser than x/y, which is why all distances
+must be computed in scaled µm, never raw voxels.
+
+### Intensity distributions
+
+Each `zarr.json` embeds per-dataset intensity quantiles, so we can compare
+brightness across all datasets without touching a single voxel.
+
+```{python}
+# | label: intensity
+# | fig-cap: "Per-dataset intensity quantiles (log scale). Wide spread ⇒ detection needs per-image normalisation."
+qcols = [c for c in geom.columns if c.startswith("q")]
+qlevels = [float(c[1:]) for c in qcols]
+geom["embryo"] = geom["dataset"].map(embryo).where(
+    geom["dataset"].isin(train_names), other="test"
+)
+
+fig, ax = plt.subplots(figsize=(8, 4.5))
+for _, row in geom.iterrows():
+    col = {"44b6": C_44b6, "6bba": C_6bba, "test": "#999999"}[row["embryo"]]
+    ax.plot(qlevels, [row[c] for c in qcols], color=col, alpha=0.25, lw=0.8)
+ax.set_yscale("log")
+ax.set_xlabel("quantile")
+ax.set_ylabel("intensity (uint16)")
+ax.set_title("Intensity quantile curves, one line per dataset")
+handles = [
+    plt.Line2D([], [], color=C_44b6, label="44b6"),
+    plt.Line2D([], [], color=C_6bba, label="6bba"),
+    plt.Line2D([], [], color="#999999", label="test"),
+]
+ax.legend(handles=handles, title="embryo")
+plt.show()
+
+med = geom.groupby("embryo")[["q0.1", "q0.9", "q0.99", "q1.0"]].median()
+print("median intensity quantiles by embryo:")
+print(med.round(0).to_string())
+```
+
+Intensity ranges vary widely between datasets (background ~15–100, bright nuclei
+up to ~4000), and the two embryos differ. **Detection must normalise per image**
+— a fixed global threshold will not transfer.
+
+## 3. Ground-truth graph structure
+
+Now scan every `.geff` into a `TrackGraph` and summarise. This reads only the
+graph stores (small), not the images.
+
+```{python}
+# | label: gt-scan
+def gt_summary(geff_path: Path) -> dict:
+    g, est = read_geff(geff_path)
+    tps = g.timepoints()
+    # frame-to-frame displacement along each edge, in scaled µm
+    disps = []
+    for u, v in g.edges():
+        nu, nv = g.node(u), g.node(v)
+        disps.append(float(np.linalg.norm(nu.scaled_coord() - nv.scaled_coord())))
+    disps = np.asarray(disps) if disps else np.array([np.nan])
+    return {
+        "dataset": geff_path.name[: -len(".geff")],
+        "embryo": embryo(geff_path.name),
+        "n_nodes": g.num_nodes(),
+        "n_edges": g.num_edges(),
+        "n_divisions": len(g.divisions()),
+        "est_nodes": est,
+        "t_min": min(tps),
+        "t_max": max(tps),
+        "n_timepoints": len(tps),
+        "disp_median_um": float(np.nanmedian(disps)),
+        "disp_p99_um": float(np.nanpercentile(disps, 99)),
+        "disp_max_um": float(np.nanmax(disps)),
+    }
+
+
+gt = pd.DataFrame(gt_summary(p) for p in train_geff)
+gt["gt_coverage"] = gt["n_nodes"] / gt["est_nodes"]  # fraction of cells traced
+gt.describe().loc[["min", "50%", "max"]][
+    ["n_nodes", "n_edges", "n_divisions", "est_nodes", "gt_coverage", "n_timepoints"]
+].round(3)
+```
+
+```{python}
+# | label: gt-dist
+# | fig-cap: "Distribution of GT graph sizes across the 199 training datasets."
+fig, axes = plt.subplots(1, 3, figsize=(11, 3.4))
+for ax, col, title in zip(
+    axes,
+    ["n_nodes", "n_edges", "n_divisions"],
+    ["GT nodes / dataset", "GT edges / dataset", "GT divisions / dataset"],
+):
+    for emb, c in [("44b6", C_44b6), ("6bba", C_6bba)]:
+        ax.hist(gt.loc[gt.embryo == emb, col], bins=25, alpha=0.6, color=c, label=emb)
+    ax.set_title(title)
+    ax.set_xlabel(col)
+axes[0].set_ylabel("datasets")
+axes[0].legend(title="embryo")
+plt.tight_layout()
+plt.show()
+```
+
+## 4. The ground truth is *sparse*
+
+This is the single most important fact for the metric. The GT is a hand-traced
+subset of cells — `estimated_number_of_nodes` records the *true* dense cell count.
+
+```{python}
+# | label: sparsity
+# | fig-cap: "Traced GT nodes vs the estimated true cell count. Points sit far below the diagonal."
+fig, ax = plt.subplots(figsize=(7, 5))
+for emb, c in [("44b6", C_44b6), ("6bba", C_6bba)]:
+    sub = gt[gt.embryo == emb]
+    ax.scatter(sub["est_nodes"], sub["n_nodes"], s=18, alpha=0.6, color=c, label=emb)
+lim = [gt["est_nodes"].min(), gt["est_nodes"].max()]
+ax.plot(lim, lim, "k--", lw=1, alpha=0.5, label="1:1 (fully traced)")
+ax.plot(lim, [x * 0.1 for x in lim], "k:", lw=1, alpha=0.5, label="10% traced")
+ax.set_xlabel("estimated_number_of_nodes (dense true count)")
+ax.set_ylabel("GT nodes actually traced")
+ax.set_title("GT coverage — the annotation is a sparse subset")
+ax.legend()
+plt.show()
+
+print(f"median GT coverage: {gt['gt_coverage'].median():.1%} of cells traced")
+print(f"range: {gt['gt_coverage'].min():.1%} – {gt['gt_coverage'].max():.1%}")
+```
+
+Only a few percent of cells are traced. **Consequences the metric already
+encodes (do not "fix"):**
+
+- predicted edges touching *unmatched* nodes are **ignored**, not counted as false
+  positives — otherwise every correctly-detected-but-unlabelled cell would be
+  punished;
+- an explicit over-prediction penalty `raw × (n_est / n_pred)` kicks in only when
+  you predict *more* nodes than the dense estimate.
+
+This means detection recall on unlabelled cells is essentially free; what is
+scored is the **linking** among cells that happen to be traced.
+
+## 5. Temporal coverage
+
+```{python}
+# | label: temporal
+# | fig-cap: "GT covers t=0 onward but often stops before the 100-frame image ends."
+fig, ax = plt.subplots(figsize=(8, 3.4))
+ax.hist(gt["t_max"], bins=range(0, 101, 5), color="#55A868", alpha=0.8)
+ax.axvline(99, color="k", ls="--", lw=1, label="last image frame (t=99)")
+ax.set_xlabel("last GT timepoint (t_max)")
+ax.set_ylabel("datasets")
+ax.set_title("GT temporal extent (images always have T=100)")
+ax.legend()
+plt.show()
+
+print(f"t_min is always 0: {(gt['t_min'] == 0).all()}")
+print(gt["t_max"].describe()[["min", "50%", "max"]].round(0).to_string())
+```
+
+GT always starts at `t=0`; its end varies (median 99, some as early as 50).
+Predictions may be made on all 100 frames, but are only scored where GT exists.
+
+## 6. Cell motion — does the 7 µm gate cover real displacement?
+
+The tracker's association cost and the metric both gate node matches at
+`MATCH_MAX_UM = 7 µm`. That gate governs *matching predictions to GT*, but the
+frame-to-frame displacement of a real cell is the closest physical analogue for
+"how far a link reaches". If cells routinely move further than 7 µm per frame,
+linking is genuinely hard.
+
+```{python}
+# | label: motion
+# | fig-cap: "Frame-to-frame displacement along GT edges (scaled µm), pooled across all datasets."
+disp_all = []
+for p in train_geff:
+    g, _ = read_geff(p)
+    for u, v in g.edges():
+        nu, nv = g.node(u), g.node(v)
+        disp_all.append(float(np.linalg.norm(nu.scaled_coord() - nv.scaled_coord())))
+disp_all = np.asarray(disp_all)
+
+fig, ax = plt.subplots(figsize=(8, 4))
+ax.hist(disp_all, bins=80, color="#8172B3", alpha=0.85)
+ax.axvline(MATCH_MAX_UM, color="crimson", ls="--", lw=1.5, label=f"MATCH_MAX_UM = {MATCH_MAX_UM} µm")
+ax.set_xlabel("GT edge displacement (µm / frame)")
+ax.set_ylabel("edges")
+ax.set_title("How far cells move between consecutive frames")
+ax.legend()
+plt.show()
+
+pct_over = (disp_all > MATCH_MAX_UM).mean()
+print(f"edges: {len(disp_all):,}")
+for p in (50, 90, 99, 100):
+    print(f"  p{p:<3d} displacement: {np.percentile(disp_all, p):5.2f} µm")
+print(f"fraction of GT links longer than {MATCH_MAX_UM} µm: {pct_over:.2%}")
+```
+
+Most cells move well under the gate, but the tail matters: the fraction of links
+exceeding 7 µm quantifies how many true links a pure nearest-neighbour tracker
+within the gate can never recover. A motion-aware / gap-closing tracker (the core
+IP) is what reaches those.
+
+## 7. Divisions — the core-IP target
+
+Half the metric is the Division Jaccard, and the baseline tracker emits **zero**
+divisions. So division recall is pure upside.
+
+```{python}
+# | label: divisions
+n_with = int((gt["n_divisions"] > 0).sum())
+print(f"datasets with >=1 division: {n_with} / {len(gt)}")
+print(f"total divisions across train: {int(gt['n_divisions'].sum())}")
+print(f"divisions per dataset (nonzero): "
+      f"median {int(gt.loc[gt.n_divisions > 0, 'n_divisions'].median())}, "
+      f"max {int(gt['n_divisions'].max())}")
+
+# When do divisions happen? Collect the timepoint of every parent node.
+div_times = []
+for p in train_geff:
+    g, _ = read_geff(p)
+    for d in g.divisions():
+        div_times.append(g.node(d).t)
+
+fig, ax = plt.subplots(figsize=(8, 3.4))
+ax.hist(div_times, bins=range(0, 101, 5), color="#C44E52", alpha=0.85)
+ax.set_xlabel("timepoint of division (parent node t)")
+ax.set_ylabel("division events")
+ax.set_title("When divisions occur over the movie")
+plt.show()
+```
+
+## 8. The test set has offline ground truth
+
+The four test images are **byte-identical copies of same-named datasets in
+`data/train`**, which ship `.geff` GT. So we can compute the exact competition
+metric on the real test images locally — a strong leaderboard proxy (with the
+usual caveat: don't overfit to just four datasets, and the Kaggle LB still scores
+against its own held-out sparse GT).
+
+```{python}
+# | label: test-gt
+test_names = [p.name[: -len(".zarr")] for p in test_zarr]
+rows = []
+for n in test_names:
+    tr = TRAIN / f"{n}.geff"
+    rows.append(
+        {
+            "dataset": n,
+            "in_train": tr.is_dir(),
+            **{k: v for k, v in gt_summary(tr).items() if k in ("n_nodes", "n_edges", "n_divisions", "est_nodes")},
+        }
+    )
+pd.DataFrame(rows)
+```
+
+```{python}
+# | label: local-metric-demo
+# Oracle: scoring the GT graphs against themselves must yield a perfect score,
+# which confirms the metric + loaders agree on the real files.
+graphs, est = {}, {}
+for n in test_names:
+    g, e = read_geff(TRAIN / f"{n}.geff")
+    graphs[n], est[n] = g, e
+
+res = score(graphs, graphs, est_nodes=est)
+print("Local metric oracle on the 4 test datasets (GT vs GT):")
+print(f"  Edge Jaccard:     {res.edge_jaccard:.4f}")
+print(f"  Division Jaccard: {res.division_jaccard:.4f}")
+print(f"  Combined:         {res.combined:.4f}")
+print("\nWorkflow for a real submission:")
+print("  celltrack eval submission.csv data/train --pred-only --per-dataset")
+```
+
+## 9. Visual check — image with GT overlay
+
+Finally, confirm the GT centroids actually land on nuclei. We read a **single
+timepoint** of one volume (streaming, never the whole array) and overlay the GT
+nodes at that frame on a max-intensity projection over z.
+
+```{python}
+# | label: overlay
+# | fig-cap: "Max-z projection of one timepoint with GT node centroids (yellow) overlaid."
+demo = test_names[-1]  # a dataset that also has divisions
+g, _ = read_geff(TRAIN / f"{demo}.geff")
+# pick the timepoint with the most GT nodes for a fuller picture
+best_t = max(g.timepoints(), key=lambda t: len(g.nodes_at_time(t)))
+nodes = g.nodes_at_time(best_t)
+
+arr = open_dataset(TEST, demo)
+vol = np.asarray(read_volume(arr, best_t))  # (Z, Y, X), one frame only
+proj = vol.max(axis=0)
+
+fig, ax = plt.subplots(figsize=(6, 6))
+ax.imshow(proj, cmap="gray", vmax=np.percentile(proj, 99.5))
+ax.scatter(
+    [n.x for n in nodes], [n.y for n in nodes],
+    s=40, facecolors="none", edgecolors="yellow", linewidths=1.2,
+)
+ax.set_title(f"{demo}  t={best_t}  ({len(nodes)} GT nodes)")
+ax.set_xlabel("x")
+ax.set_ylabel("y")
+ax.grid(False)
+plt.show()
+```
+
+## Summary
+
+| Fact | Value | Implication |
+|---|---|---|
+| Image shape / dtype | `(100, 64, 256, 256)` uint16, ~800 MB | fits in RAM; stream by choice, not necessity |
+| Voxel scale (z, y, x) µm | `(1.625, 0.40625, 0.40625)` | anisotropic; always work in scaled µm |
+| GT coverage | ~few % of cells traced | metric ignores unmatched nodes; detection recall is cheap |
+| GT edge displacement | most < 7 µm, with a tail | NN-within-gate misses long links → motion-aware tracker wins |
+| Divisions | present in many datasets, baseline emits 0 | half the metric is pure upside |
+| Test GT | 4 test images duplicated in train w/ `.geff` | real local metric via `eval --pred-only` |
+
+The verified constants (`VOXEL_SCALE_UM`, `MATCH_MAX_UM`) and the sparse-GT
+metric rules in `celltrack` all hold up against the real data.

@@ -140,6 +140,16 @@ def eval_cmd(
     gt: str = typer.Argument(
         ..., help="Ground truth: a submission CSV, or a directory of .geff stores."
     ),
+    pred_only: bool = typer.Option(
+        False,
+        help=(
+            "Score only the datasets present in the prediction. Use this for local "
+            "validation against a GT directory that holds more datasets than you "
+            "predicted (e.g. eval a 4-dataset submission against all of data/train) — "
+            "otherwise the un-predicted GT datasets score 0 and dilute the result."
+        ),
+    ),
+    per_dataset: bool = typer.Option(False, help="Print per-dataset edge scores."),
 ) -> None:
     """Score a prediction against ground truth using the competition metric.
 
@@ -156,7 +166,23 @@ def eval_cmd(
     else:
         gt_graphs, est_nodes = read_submission(gt), None
 
+    if pred_only:
+        keep = set(pred_graphs)
+        missing = keep - set(gt_graphs)
+        if missing:
+            raise typer.BadParameter(f"--pred-only: no ground truth for {sorted(missing)}")
+        gt_graphs = {d: g for d, g in gt_graphs.items() if d in keep}
+        if est_nodes is not None:
+            est_nodes = {d: n for d, n in est_nodes.items() if d in keep}
+
     result = score(pred_graphs, gt_graphs, est_nodes=est_nodes)
+    if per_dataset:
+        for dataset, s in sorted(result.per_sample.items()):
+            typer.echo(
+                f"  {dataset}: edge={s.adjusted:.4f} "
+                f"(tp={s.tp} fp={s.fp} fn={s.fn}, n_pred={s.n_pred_nodes})"
+            )
+    typer.echo(f"Datasets scored:  {len(gt_graphs)}")
     typer.echo(f"Edge Jaccard:     {result.edge_jaccard:.4f}")
     typer.echo(f"Division Jaccard: {result.division_jaccard:.4f}")
     typer.echo(f"Combined:         {result.combined:.4f}")

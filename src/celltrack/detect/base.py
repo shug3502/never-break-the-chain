@@ -27,5 +27,4 @@ class Detection:
 class Detector(Protocol):
     """Detect nuclei in a single 3D volume."""
 
-    def detect(self, volume: np.ndarray) -> list[Detection]:
-        ...
+    def detect(self, volume: np.ndarray) -> list[Detection]: ...
