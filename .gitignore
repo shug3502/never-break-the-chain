@@ -14,9 +14,12 @@ __pycache__/
 build/
 dist/
 
-# Notebooks / Quarto
+# Notebooks / Quarto (rendered outputs & caches are regenerable)
 *_files/
 /.quarto/
+**/.quarto/
+**/.jupyter_cache/
+notebooks/*.html
 
 # OS / editor
 .DS_Store

@@ -45,6 +45,6 @@ def _masks_to_detections(masks: np.ndarray) -> list[Detection]:
         return []
     centroids = ndi.center_of_mass(np.ones_like(masks), labels=masks, index=labels)
     out: list[Detection] = []
-    for (z, y, x) in centroids:
+    for z, y, x in centroids:
         out.append(Detection(z=int(round(z)), y=int(round(y)), x=int(round(x))))
     return out

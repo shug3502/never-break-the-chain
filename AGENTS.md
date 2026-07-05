@@ -93,9 +93,17 @@ docs/ideas/pre-training.md  # pre-training ideas (simulator == "Idea 2")
     `n_pred > n_est`, where `n_est` = GT `.geff` `estimated_number_of_nodes`.
   - Edge Jaccard is weight-averaged by support `(TP+FP+FN)`; division Jaccard is
     micro-averaged across samples. **Scores can exceed 1.0.**
-- **GT is `.geff`** (zarr graph), not CSV. Use `celltrack.data.geff`.
-- **Images are zarr v3**, shape `(T, Z, Y, X)`, full-res at `<ds>.zarr/0`,
-  terabyte-scale → stream per timepoint, never load whole datasets into RAM.
+- **GT is `.geff`** (zarr graph), not CSV. Use `celltrack.data.geff`. GT is a
+  hand-traced **sparse subset** (~3–4% of cells; median 659 GT nodes vs ~18k
+  estimated) — never treat un-annotated cells as false positives.
+- **Images are zarr v3**, shape `(T=100, Z=64, Y=256, X=256)` `uint16` (~800 MB
+  each), single full-res array at `<ds>.zarr/0`. Not terabyte-scale despite the
+  IO helpers streaming per timepoint — a whole volume fits in RAM.
+- **The 4 test images have offline GT.** They are byte-identical copies of
+  same-named `data/train` datasets, which ship `.geff` GT — score the real test
+  set locally with `celltrack eval <pred> data/train --pred-only`. `eval` over a
+  `.geff` dir scores *every* dataset in it, so `--pred-only` (restrict to the
+  predicted datasets) is required or the result is diluted to ~0.
 
 ## Mechanistic lineage simulator (`celltrack.pretrain`)
 

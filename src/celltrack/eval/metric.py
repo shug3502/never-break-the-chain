@@ -136,8 +136,13 @@ def edge_jaccard(
         adjusted = raw * (n_est / n_pred)
 
     return EdgeScore(
-        tp=tp, fp=fp, fn=fn, n_pred_nodes=n_pred, n_est_nodes=n_est,
-        jaccard=raw, adjusted=adjusted,
+        tp=tp,
+        fp=fp,
+        fn=fn,
+        n_pred_nodes=n_pred,
+        n_est_nodes=n_est,
+        jaccard=raw,
+        adjusted=adjusted,
     )
 
 
