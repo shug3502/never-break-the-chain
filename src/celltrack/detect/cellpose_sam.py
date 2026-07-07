@@ -13,8 +13,37 @@ from scipy import ndimage as ndi
 from celltrack.constants import VOXEL_SCALE_UM
 from celltrack.detect.base import Detection
 
-# z is ~4x coarser than xy; tell Cellpose so it uses correct 3D kernel scaling.
+# z is ~4x coarser than xy; used only by the do_3D path to scale Cellpose's 3D kernels.
 _DEFAULT_ANISOTROPY = VOXEL_SCALE_UM[0] / VOXEL_SCALE_UM[1]  # 1.625 / 0.40625 ≈ 4.0
+
+
+def _build_eval_kwargs(
+    *,
+    diameter: float | None,
+    do_3d: bool,
+    stitch_threshold: float,
+    anisotropy: float,
+    flow_threshold: float | None,
+    cellprob_threshold: float | None,
+) -> dict:
+    """Build Cellpose ``eval`` kwargs for the chosen detection mode.
+
+    The volume is (Z, Y, X), so ``z_axis=0`` is always required. Two modes:
+
+    - ``do_3d=True``: volumetric flow prediction (accurate, slow). Resamples Z to
+      isotropic using ``anisotropy`` and runs the network over XY/XZ/YZ planes.
+    - ``do_3d=False`` (default): 2D inference per native Z-slice, stitched into 3D
+      instances by IoU (``stitch_threshold``). ``anisotropy`` is irrelevant here.
+    """
+    if do_3d:
+        kwargs: dict = dict(diameter=diameter, anisotropy=anisotropy, do_3D=True, z_axis=0)
+    else:
+        kwargs = dict(diameter=diameter, stitch_threshold=stitch_threshold, z_axis=0)
+    if flow_threshold is not None:
+        kwargs["flow_threshold"] = flow_threshold
+    if cellprob_threshold is not None:
+        kwargs["cellprob_threshold"] = cellprob_threshold
+    return kwargs
 
 
 class CellposeSamDetector:
@@ -23,6 +52,9 @@ class CellposeSamDetector:
     Produces one :class:`Detection` per segmented instance (its integer voxel
     centroid). Segmentation masks are reduced to centroids because the
     competition metric operates on nodes (centroids) and edges.
+
+    By default detection uses fast 2D+Z-stitching (``do_3d=False``); the accurate
+    but much slower volumetric ``do_3D`` path is available via ``do_3d=True``.
     """
 
     def __init__(
@@ -33,6 +65,9 @@ class CellposeSamDetector:
         anisotropy: float | None = None,
         flow_threshold: float | None = None,
         cellprob_threshold: float | None = None,
+        do_3d: bool = False,
+        stitch_threshold: float = 0.3,
+        amp: bool = True,
         gpu: bool = True,
     ) -> None:
         # Lazy import: keeps torch/cellpose out of the core install.
@@ -44,21 +79,30 @@ class CellposeSamDetector:
         self._anisotropy = anisotropy if anisotropy is not None else _DEFAULT_ANISOTROPY
         self._flow_threshold = flow_threshold
         self._cellprob_threshold = cellprob_threshold
+        self._do_3d = do_3d
+        self._stitch_threshold = stitch_threshold
+        self._amp = amp
+        self._gpu = gpu
 
     def detect(self, volume: np.ndarray) -> list[Detection]:
-        # volume is (Z, Y, X); z_axis=0 is required by newer Cellpose when do_3D=True.
-        kwargs: dict = dict(
+        kwargs = _build_eval_kwargs(
             diameter=self._diameter,
+            do_3d=self._do_3d,
+            stitch_threshold=self._stitch_threshold,
             anisotropy=self._anisotropy,
-            do_3D=True,
-            z_axis=0,
+            flow_threshold=self._flow_threshold,
+            cellprob_threshold=self._cellprob_threshold,
         )
-        if self._flow_threshold is not None:
-            kwargs["flow_threshold"] = self._flow_threshold
-        if self._cellprob_threshold is not None:
-            kwargs["cellprob_threshold"] = self._cellprob_threshold
 
-        result = self._model.eval(volume, **kwargs)
+        import torch  # noqa: PLC0415  # lazy, consistent with the cellpose import above
+
+        # bf16 autocast is a free ~1.5-2x on the ViT; CUDA-only, so guard on it.
+        if self._amp and self._gpu and torch.cuda.is_available():
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                result = self._model.eval(volume, **kwargs)
+        else:
+            result = self._model.eval(volume, **kwargs)
+
         # Cellpose eval returns (masks, flows, styles) or (masks, flows, styles, probs)
         masks = result[0]
         probs: np.ndarray | None = result[3] if len(result) > 3 else None

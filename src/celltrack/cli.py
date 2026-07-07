@@ -46,11 +46,18 @@ def detect(
     diameter: float = typer.Option(None, help="Expected nucleus diameter in voxels (None = auto)."),
     anisotropy: float = typer.Option(
         None,
-        help="Z/XY voxel ratio for 3D kernel scaling (None = auto ~4.0 from VOXEL_SCALE_UM).",
+        help="Z/XY voxel ratio for 3D kernel scaling (only used with --do-3d; None = auto ~4.0).",
     ),
     flow_threshold: float = typer.Option(None, help="Cellpose flow_threshold (None = default)."),
     cellprob_threshold: float = typer.Option(
         None, help="Cellpose cellprob_threshold (None = default)."
+    ),
+    stitch_threshold: float = typer.Option(0.3, help="2D→3D mask stitch IoU (default path)."),
+    do_3d: bool = typer.Option(
+        False, "--do-3d", help="Use slower volumetric do_3D path instead of 2D+stitch."
+    ),
+    amp: bool = typer.Option(
+        True, "--amp/--no-amp", help="bf16 autocast on GPU (default on; no-op on CPU)."
     ),
 ) -> None:
     """Detect nuclei per timepoint with Cellpose-SAM (requires the 'detect' extra)."""
@@ -64,6 +71,9 @@ def detect(
         anisotropy=anisotropy,
         flow_threshold=flow_threshold,
         cellprob_threshold=cellprob_threshold,
+        stitch_threshold=stitch_threshold,
+        do_3d=do_3d,
+        amp=amp,
     )
     out = Path(det_dir)
     out.mkdir(parents=True, exist_ok=True)
