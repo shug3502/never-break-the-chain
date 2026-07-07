@@ -1,7 +1,8 @@
 # Data & model artifacts (never commit — competition data is large & external)
-data/
-models/
-outputs/
+# Anchored to repo root so the src/celltrack/data package is still tracked
+/data/
+/models/
+/outputs/
 *.zarr/
 
 # Python
