@@ -67,7 +67,7 @@ class CellposeSamDetector:
         cellprob_threshold: float | None = None,
         do_3d: bool = False,
         stitch_threshold: float = 0.3,
-        amp: bool = True,
+        amp: bool = False,
         gpu: bool = True,
     ) -> None:
         # Lazy import: keeps torch/cellpose out of the core install.
@@ -96,7 +96,10 @@ class CellposeSamDetector:
 
         import torch  # noqa: PLC0415  # lazy, consistent with the cellpose import above
 
-        # bf16 autocast is a free ~1.5-2x on the ViT; CUDA-only, so guard on it.
+        # Optional bf16 autocast (opt-in via --amp; CUDA-only, so guard on it).
+        # Off by default: benchmarked ~20% SLOWER than no-amp
+        # where cellpose 4.x already runs the ViT in an efficient dtype, so the
+        # outer autocast just adds overhead. May still help on older archs.
         if self._amp and self._gpu and torch.cuda.is_available():
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 result = self._model.eval(volume, **kwargs)

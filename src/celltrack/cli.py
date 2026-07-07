@@ -57,7 +57,9 @@ def detect(
         False, "--do-3d", help="Use slower volumetric do_3D path instead of 2D+stitch."
     ),
     amp: bool = typer.Option(
-        True, "--amp/--no-amp", help="bf16 autocast on GPU (default on; no-op on CPU)."
+        False,
+        "--amp/--no-amp",
+        help="bf16 autocast on GPU (default off; slower than no-amp on Hopper, no-op on CPU).",
     ),
 ) -> None:
     """Detect nuclei per timepoint with Cellpose-SAM (requires the 'detect' extra)."""
