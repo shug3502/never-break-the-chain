@@ -43,12 +43,28 @@ def detect(
     det_dir: str = typer.Option("outputs/detections", help="Output directory."),
     model: str = typer.Option("cpsam", help="Cellpose model type."),
     gpu: bool = typer.Option(True, help="Use GPU."),
+    diameter: float = typer.Option(None, help="Expected nucleus diameter in voxels (None = auto)."),
+    anisotropy: float = typer.Option(
+        None,
+        help="Z/XY voxel ratio for 3D kernel scaling (None = auto ~4.0 from VOXEL_SCALE_UM).",
+    ),
+    flow_threshold: float = typer.Option(None, help="Cellpose flow_threshold (None = default)."),
+    cellprob_threshold: float = typer.Option(
+        None, help="Cellpose cellprob_threshold (None = default)."
+    ),
 ) -> None:
     """Detect nuclei per timepoint with Cellpose-SAM (requires the 'detect' extra)."""
     from celltrack.data.io import open_dataset, read_volume
     from celltrack.detect.cellpose_sam import CellposeSamDetector
 
-    detector = CellposeSamDetector(model_type=model, gpu=gpu)
+    detector = CellposeSamDetector(
+        model_type=model,
+        gpu=gpu,
+        diameter=diameter,
+        anisotropy=anisotropy,
+        flow_threshold=flow_threshold,
+        cellprob_threshold=cellprob_threshold,
+    )
     out = Path(det_dir)
     out.mkdir(parents=True, exist_ok=True)
     for dataset in list_datasets(data_dir):
